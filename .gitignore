@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# CDK
+.cdk.staging/
+cdk.out/
+
+# Local env and editors
+.env
+.idea/
+.vscode/
+*.swp
+
+# CDK CLI, if installed in the repo
+node_modules/
