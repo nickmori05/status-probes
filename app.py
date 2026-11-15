@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""CDK app: one status table, and a probe stack in each region.
+
+Synthesis does not call AWS. Set CDK_DEFAULT_ACCOUNT to the target account;
+otherwise a placeholder account is used so `cdk synth` runs with no credentials.
+"""
+
+from __future__ import annotations
+
+import os
+
+import aws_cdk as cdk
+from infra.status_data import StatusDataStack
+from infra.status_probe import StatusProbeStack
+
+# Placeholder is the AWS documentation account. Synth never looks it up.
+ACCOUNT = os.environ.get("CDK_DEFAULT_ACCOUNT", "123456789012")
+DATA_REGION = "us-east-1"
+# Region is part of the stack's identity, so the loop interpolates it into
+# the stack id on purpose. Resource ids inside the stack do not repeat it.
+PROBE_REGIONS = ("us-west-2", "us-east-1", "eu-west-1")
+ENDPOINTS = os.environ.get("PROBE_ENDPOINTS", "https://example.com")
+
+app = cdk.App()
+
+StatusDataStack(
+    app,
+    "StatusData",
+    env=cdk.Environment(account=ACCOUNT, region=DATA_REGION),
+    description="On-demand probe-results table. Probes do not write to it yet.",
+)
+
+for region in PROBE_REGIONS:
+    StatusProbeStack(
+        app,
+        f"StatusProbe-{region}",
+        endpoints=ENDPOINTS,
+        env=cdk.Environment(account=ACCOUNT, region=region),
+        description=f"Minute HTTP probe in {region}.",
+    )
+
+app.synth()
