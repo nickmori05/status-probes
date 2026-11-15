@@ -10,12 +10,12 @@ from __future__ import annotations
 import os
 
 import aws_cdk as cdk
-from infra.status_data import StatusDataStack
+from infra.status_data import TABLE_REGION, StatusDataStack
 from infra.status_probe import StatusProbeStack
 
 # Placeholder is the AWS documentation account. Synth never looks it up.
 ACCOUNT = os.environ.get("CDK_DEFAULT_ACCOUNT", "123456789012")
-DATA_REGION = "us-east-1"
+DATA_REGION = TABLE_REGION
 # Region is part of the stack's identity, so the loop interpolates it into
 # the stack id on purpose. Resource ids inside the stack do not repeat it.
 PROBE_REGIONS = ("us-west-2", "us-east-1", "eu-west-1")
@@ -27,7 +27,7 @@ StatusDataStack(
     app,
     "StatusData",
     env=cdk.Environment(account=ACCOUNT, region=DATA_REGION),
-    description="On-demand probe-results table. Probes do not write to it yet.",
+    description="On-demand probe-results table in us-east-1.",
 )
 
 for region in PROBE_REGIONS:

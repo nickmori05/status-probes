@@ -1,6 +1,6 @@
 # status-probes
 
-Multi-region HTTP probes on AWS, and the table a status page will eventually read. Each region checks the same endpoints once a minute and reports the status code and the latency. Nothing is deployed from this repository, and the probes do not write to DynamoDB yet.
+Multi-region HTTP probes on AWS, and the table a status page will eventually read. Each region checks the same endpoints once a minute, reports the status code and the latency, and writes that observation to DynamoDB. Nothing is deployed from this repository.
 
 ## Architecture
 
@@ -21,13 +21,16 @@ flowchart LR
   fnW --> sites
   fnE --> sites
   fnU --> sites
+  fnW --> table
+  fnE --> table
+  fnU --> table
 ```
 
-`StatusData` creates `probe-results` in us-east-1 only. Billing is on-demand. The TTL attribute is `ttl` (epoch seconds). The partition key `pk` is the endpoint, and the sort key `sk` is reserved for the observation time and region. The table has deletion protection, termination protection, and point-in-time recovery, and it is retained on stack deletion.
+`StatusData` creates `probe-results` in us-east-1 only. Billing is on-demand. The TTL attribute is `ttl` (epoch seconds). The partition key `pk` is the endpoint URL. The sort key `sk` is the ISO-8601 UTC observation time, a `#`, and the probe region, for example `2026-11-15T13:20:01.250000Z#eu-west-1`. The table has deletion protection, termination protection, and point-in-time recovery, and it is retained on stack deletion.
 
-`StatusProbe` is one stack per region: us-west-2, us-east-1, and eu-west-1. Each stack is a Python 3.12 Lambda (`probe.handler.handler`) and an EventBridge rule on a one-minute rate. The function's `ENDPOINTS` variable is a comma-separated list, taken from `PROBE_ENDPOINTS` at synth time or defaulting to `https://example.com`. The function returns its observations. It has no DynamoDB permissions and does not store them.
+`StatusProbe` is one stack per region: us-west-2, us-east-1, and eu-west-1. Each stack is a Python 3.12 Lambda (`probe.handler.handler`) and an EventBridge rule on a one-minute rate. The function package is `src/`. Lambda's Python 3.12 runtime provides boto3, so the package does not vendor it. The function's `ENDPOINTS` variable is a comma-separated list, taken from `PROBE_ENDPOINTS` at synth time or defaulting to `https://example.com`. `TABLE_NAME` is `probe-results` and `TABLE_REGION` is `us-east-1`. The probe region on each item is `AWS_REGION`, which Lambda sets. An item also stores the status code, the latency in milliseconds, `ok`, `error`, and `ttl`. `ttl` is the time of the observation plus `RESULT_RETENTION_DAYS` (default 7). One observation is a PutItem. More than one uses the batch writer. The function returns its observations. If the write fails, it logs those observations and re-raises: the results stay in the log, and the invocation fails.
 
-The three probe stacks do not reference the table, so they can be deployed in any order later.
+The role may call `dynamodb:PutItem` and `dynamodb:BatchWriteItem` on `arn:aws:dynamodb:us-east-1:<account>:table/probe-results`. Those are its only added actions. The ARN is built from the table name, the stack account, and us-east-1. The probe stacks do not import the table, so they can be deployed in any order later.
 
 ## Local commands
 
@@ -55,8 +58,11 @@ PROBE_ENDPOINTS="https://example.com,https://example.org" cdk synth
 | Path | What it is |
 | --- | --- |
 | `src/probe/checker.py` | GET one URL; status code and latency to headers |
-| `src/probe/handler.py` | Lambda handler. Reads `ENDPOINTS`, returns the results |
+| `src/probe/writer.py` | One observation as a `probe-results` item, then PutItem or the batch writer |
+| `src/probe/handler.py` | Lambda handler. Reads `ENDPOINTS`, stores observations, returns them |
 | `tests/test_probe.py` | Pytest coverage of the checker and the handler, with HTTP mocked |
+| `tests/test_writer.py` | Item shape (`pk`, `sk`, `ttl`) and handler writes. DynamoDB is mocked |
+| `tests/test_status_probe.py` | Synthesized template: table env vars and the write policy |
 | `infra/status_data.py` | `StatusData` stack |
 | `infra/status_probe.py` | `StatusProbe` stack |
 | `app.py` | Wires the table and the three regional probes |

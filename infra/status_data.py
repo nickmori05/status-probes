@@ -1,4 +1,4 @@
-"""The single status table. Probes do not write to it yet."""
+"""The single status table. Probes in every region write their observations here."""
 
 from __future__ import annotations
 
@@ -7,17 +7,17 @@ from aws_cdk import aws_dynamodb as dynamodb
 from constructs import Construct
 
 TABLE_NAME = "probe-results"
+TABLE_REGION = "us-east-1"
 TTL_ATTRIBUTE = "ttl"
 
 
 class StatusDataStack(Stack):
     """On-demand ``probe-results`` table in us-east-1, with a TTL attribute.
 
-    The table is the future home of probe observations. Nothing in this
-    repository writes to it. Keys are fixed now so a later writer does not
-    have to replace the table: ``pk`` is the endpoint, ``sk`` is the
-    observation time and region, and ``ttl`` is the epoch second DynamoDB
-    expires.
+    ``pk`` is the endpoint, ``sk`` is the observation time and region, and
+    ``ttl`` is the epoch second DynamoDB expires. Probe stacks name this
+    table themselves. They do not import it, so this stack can be deployed
+    in any order relative to them.
     """
 
     def __init__(self, scope: Construct, construct_id: str, **kwargs: object) -> None:
