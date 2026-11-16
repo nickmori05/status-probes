@@ -1,4 +1,4 @@
-"""HTTP probes that record a status code and a latency, and store the observation."""
+"""HTTP probes that record a status code and a latency, store it, and read a quorum."""
 
 from probe.checker import ProbeResult, check_url
 

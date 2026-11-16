@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CDK app: one status table, and a probe stack in each region.
+"""CDK app: one status table, a probe in each region, and a quorum reader.
 
 Synthesis does not call AWS. Set CDK_DEFAULT_ACCOUNT to the target account;
 otherwise a placeholder account is used so `cdk synth` runs with no credentials.
@@ -12,6 +12,7 @@ import os
 import aws_cdk as cdk
 from infra.status_data import TABLE_REGION, StatusDataStack
 from infra.status_probe import StatusProbeStack
+from infra.status_quorum import StatusQuorumStack
 
 # Placeholder is the AWS documentation account. Synth never looks it up.
 ACCOUNT = os.environ.get("CDK_DEFAULT_ACCOUNT", "123456789012")
@@ -38,5 +39,12 @@ for region in PROBE_REGIONS:
         env=cdk.Environment(account=ACCOUNT, region=region),
         description=f"Minute HTTP probe in {region}.",
     )
+
+StatusQuorumStack(
+    app,
+    "StatusQuorum",
+    env=cdk.Environment(account=ACCOUNT, region=DATA_REGION),
+    description="On-demand quorum read of probe-results in us-east-1.",
+)
 
 app.synth()
