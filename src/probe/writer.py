@@ -2,8 +2,9 @@
 
 ``pk`` is the endpoint URL. ``sk`` is the ISO-8601 UTC observation time, a
 ``#``, and the probe region. ``ttl`` is the epoch second the item expires.
-The table lives in one region (``TABLE_REGION``, default us-east-1), which
-is not the region the probe runs in.
+``TABLE_REGION`` is the replica this client writes. A deployed probe sets
+it to the region the function runs in. When the variable is unset, the
+client uses us-east-1.
 """
 
 from __future__ import annotations

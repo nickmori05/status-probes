@@ -1,4 +1,4 @@
-"""Synthesized probe stack: table env vars and the write policy. No AWS calls."""
+"""Synthesized probe stack: the local replica's env vars and write policy. No AWS calls."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from aws_cdk.assertions import Template
 from infra.status_probe import StatusProbeStack
 
 ACCOUNT = "123456789012"
-TABLE_ARN = f"arn:aws:dynamodb:us-east-1:{ACCOUNT}:table/probe-results"
 PROBE_REGIONS = ("us-west-2", "us-east-1", "eu-west-1")
 
 
@@ -50,7 +49,7 @@ def _statements(template: Template) -> list[dict[str, object]]:
 
 
 @pytest.mark.parametrize("region", PROBE_REGIONS)
-def test_probe_writes_the_us_east_1_table(region: str) -> None:
+def test_probe_writes_the_replica_in_its_own_region(region: str) -> None:
     template = _stack(region, endpoints="https://example.com,https://example.org")
 
     functions = template.find_resources("AWS::Lambda::Function")
@@ -59,7 +58,7 @@ def test_probe_writes_the_us_east_1_table(region: str) -> None:
     assert variables == {
         "ENDPOINTS": "https://example.com,https://example.org",
         "TABLE_NAME": "probe-results",
-        "TABLE_REGION": "us-east-1",
+        "TABLE_REGION": region,
     }
 
     statements = _statements(template)
@@ -68,7 +67,9 @@ def test_probe_writes_the_us_east_1_table(region: str) -> None:
     assert statement["Effect"] == "Allow"
     assert statement["Sid"] == "WriteProbeResults"
     assert sorted(statement["Action"]) == ["dynamodb:BatchWriteItem", "dynamodb:PutItem"]
-    assert _arn_text(statement["Resource"]) == TABLE_ARN
+    assert _arn_text(statement["Resource"]) == (
+        f"arn:aws:dynamodb:{region}:{ACCOUNT}:table/probe-results"
+    )
     assert "ImportValue" not in json.dumps(template.to_json())
 
 

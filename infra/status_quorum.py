@@ -20,10 +20,12 @@ class StatusQuorumStack(Stack):
     """Lambda that returns the quorum for one endpoint.
 
     The caller passes ``endpoint`` in the event. The role may call
-    ``dynamodb:Query`` on ``probe-results`` and nothing else. The table ARN
-    is built from the name, this stack's account, and us-east-1, so the
-    stack does not import the table. There is no schedule: a timer would
-    have nothing to publish to yet.
+    ``dynamodb:Query`` on the us-east-1 replica of ``probe-results`` and
+    nothing else. The table ARN is built from the name, this stack's
+    account, and us-east-1, so the stack does not import the table. Writes
+    from the other regions are visible here after DynamoDB replicates
+    them. There is no schedule: a timer would have nothing to publish to
+    yet.
     """
 
     def __init__(self, scope: Construct, construct_id: str, **kwargs: object) -> None:
