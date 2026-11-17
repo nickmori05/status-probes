@@ -12,7 +12,7 @@ from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
 from constructs import Construct
 
-from infra.status_data import TABLE_NAME, TABLE_REGION
+from infra.status_data import TABLE_NAME
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 FUNCTION_NAME = "status-probe"
@@ -21,9 +21,10 @@ FUNCTION_NAME = "status-probe"
 class StatusProbeStack(Stack):
     """Probe Lambda triggered every minute. ``ENDPOINTS`` is a comma-separated list.
 
-    The function writes each observation to ``probe-results``. The table ARN
-    is built from the table name, this stack's account, and us-east-1, so
-    the stack does not import the table and can be deployed on its own.
+    The function writes each observation to the ``probe-results`` replica in
+    this stack's region. The table ARN is built from the table name, this
+    stack's account, and that region, so the stack does not import the table
+    and can be deployed on its own.
     """
 
     def __init__(
@@ -43,9 +44,10 @@ class StatusProbeStack(Stack):
             retention=logs.RetentionDays.TWO_WEEKS,
             removal_policy=RemovalPolicy.DESTROY,
         )
+        table_region = self.region
         table_arn = self.format_arn(
             service="dynamodb",
-            region=TABLE_REGION,
+            region=table_region,
             resource="table",
             resource_name=TABLE_NAME,
             arn_format=ArnFormat.SLASH_RESOURCE_NAME,
@@ -62,7 +64,7 @@ class StatusProbeStack(Stack):
             environment={
                 "ENDPOINTS": endpoints,
                 "TABLE_NAME": TABLE_NAME,
-                "TABLE_REGION": TABLE_REGION,
+                "TABLE_REGION": table_region,
             },
             log_group=log_group,
             description=(
