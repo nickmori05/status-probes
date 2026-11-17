@@ -28,7 +28,7 @@ StatusDataStack(
     app,
     "StatusData",
     env=cdk.Environment(account=ACCOUNT, region=DATA_REGION),
-    description="On-demand probe-results table in us-east-1.",
+    description="On-demand probe-results global table. Replicas in us-west-2 and eu-west-1.",
 )
 
 for region in PROBE_REGIONS:
