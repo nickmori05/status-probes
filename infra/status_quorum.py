@@ -24,8 +24,8 @@ class StatusQuorumStack(Stack):
     nothing else. The table ARN is built from the name, this stack's
     account, and us-east-1, so the stack does not import the table. Writes
     from the other regions are visible here after DynamoDB replicates
-    them. There is no schedule: a timer would have nothing to publish to
-    yet.
+    them. There is no schedule. StatusPage publishes on a timer; this
+    function stays on demand.
     """
 
     def __init__(self, scope: Construct, construct_id: str, **kwargs: object) -> None:
