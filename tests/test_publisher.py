@@ -1,4 +1,4 @@
-"""Status page rendering and S3 writes. DynamoDB and S3 are moto or fakes."""
+"""Status page rendering, S3 writes, and status-change notifications."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import boto3
 import pytest
 from moto import mock_aws
 
+from probe.alerts import STATUS_SORT_KEY
 from probe.checker import ProbeResult
 from probe.publisher import (
     CACHE_CONTROL,
@@ -43,6 +44,20 @@ class _Puts:
     def put_object(self, **kwargs: object) -> dict[str, object]:
         self.calls.append(kwargs)
         return {}
+
+
+class _Topic:
+    """Records publish calls. ``fail`` raises before a message would be sent."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.fail = False
+
+    def publish(self, **kwargs: object) -> dict[str, str]:
+        self.calls.append(kwargs)
+        if self.fail:
+            raise RuntimeError("sns unavailable")
+        return {"MessageId": "1"}
 
 
 class _Clock:
@@ -250,6 +265,7 @@ def test_handler_publishes_the_configured_endpoints(
     monkeypatch.setenv("BUCKET_NAME", "status-site")
     monkeypatch.setenv("ENDPOINTS", f"{UP}, {UNKNOWN}")
     monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("TOPIC_ARN", "arn:aws:sns:us-east-1:123456789012:status-changes")
     observed = NOW - timedelta(seconds=30)
     with mock_aws():
         clear_cached_resources()
@@ -284,6 +300,7 @@ def test_handler_queries_the_table_region_and_writes_the_function_region(
     monkeypatch.setenv("BUCKET_NAME", "status-site")
     monkeypatch.setenv("ENDPOINTS", UP)
     monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("TOPIC_ARN", "arn:aws:sns:us-east-1:123456789012:status-changes")
     seen: dict[str, object] = {}
 
     def fake_table(name: str, region: str) -> object:
@@ -291,8 +308,7 @@ def test_handler_queries_the_table_region_and_writes_the_function_region(
         return object()
 
     def fake_client(service_name: str, **kwargs: object) -> _Puts:
-        assert service_name == "s3"
-        seen["s3_region"] = kwargs.get("region_name")
+        seen[service_name] = kwargs.get("region_name")
         return _Puts()
 
     with (
@@ -304,7 +320,8 @@ def test_handler_queries_the_table_region_and_writes_the_function_region(
         handler({}, None)
 
     assert seen["table"] == ("probe-results", "us-east-1")
-    assert seen["s3_region"] == "us-east-1"
+    assert seen["s3"] == "us-east-1"
+    assert seen["sns"] == "us-east-1"
 
 
 def test_handler_does_not_publish_when_the_query_fails(
@@ -314,6 +331,7 @@ def test_handler_does_not_publish_when_the_query_fails(
     monkeypatch.setenv("TABLE_REGION", "us-east-1")
     monkeypatch.setenv("BUCKET_NAME", "status-site")
     monkeypatch.setenv("ENDPOINTS", UP)
+    monkeypatch.setenv("TOPIC_ARN", "arn:aws:sns:us-east-1:123456789012:status-changes")
     with mock_aws():
         clear_cached_resources()
         s3 = boto3.client("s3", region_name="us-east-1")
@@ -332,21 +350,106 @@ def test_handler_does_not_publish_when_the_query_fails(
         ("ENDPOINTS", " , "),
         ("BUCKET_NAME", "  "),
         ("TABLE_NAME", ""),
+        ("TOPIC_ARN", " "),
     ],
 )
-def test_handler_requires_endpoints_bucket_and_table(
+def test_handler_requires_endpoints_bucket_table_and_topic(
     monkeypatch: pytest.MonkeyPatch, env: str, value: str
 ) -> None:
     monkeypatch.setenv("ENDPOINTS", UP)
     monkeypatch.setenv("BUCKET_NAME", "status-site")
     monkeypatch.setenv("TABLE_NAME", "probe-results")
+    monkeypatch.setenv("TOPIC_ARN", "arn:aws:sns:us-east-1:123456789012:status-changes")
     monkeypatch.setenv(env, value)
     with (
         patch("probe.publisher.dynamodb_table") as table,
         patch("probe.publisher._s3_client") as client,
+        patch("probe.publisher._sns_client") as topic,
     ):
         with pytest.raises(RuntimeError):
             handler({}, None)
 
     table.assert_not_called()
     client.assert_not_called()
+    topic.assert_not_called()
+
+
+def test_handler_sends_one_message_when_the_quorum_changes(
+    aws_credentials: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TABLE_NAME", "probe-results")
+    monkeypatch.setenv("TABLE_REGION", "us-east-1")
+    monkeypatch.setenv("BUCKET_NAME", "status-site")
+    monkeypatch.setenv("ENDPOINTS", UP)
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("TOPIC_ARN", "arn:aws:sns:us-east-1:123456789012:status-changes")
+    topic = _Topic()
+    observed = NOW - timedelta(seconds=30)
+    with mock_aws():
+        clear_cached_resources()
+        table = _create_results_table()
+        _store(table, UP, "us-west-2", observed, ok=False)
+        _store(table, UP, "us-east-1", observed, ok=False)
+        table.put_item(
+            Item={
+                "pk": UP,
+                "sk": STATUS_SORT_KEY,
+                "status": "up",
+                "updated_at": "2026-11-18T13:00:00.000000Z",
+            }
+        )
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="status-site")
+        with (
+            patch("probe.publisher.datetime", _Clock),
+            patch("probe.publisher._sns_client", return_value=topic),
+        ):
+            first = handler({}, None)
+            second = handler({}, None)
+        page = s3.get_object(Bucket="status-site", Key=PAGE_KEY)
+
+    assert first["endpoints"][0]["status"] == "down"
+    assert second["endpoints"][0]["status"] == "down"
+    assert [call["Subject"] for call in topic.calls] == ["status up -> down"]
+    assert json.loads(topic.calls[0]["Message"])["endpoint"] == UP
+    assert page["Body"].read() == INDEX_HTML.encode("utf-8")
+
+
+def test_handler_keeps_the_page_when_the_notification_fails(
+    aws_credentials: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TABLE_NAME", "probe-results")
+    monkeypatch.setenv("TABLE_REGION", "us-east-1")
+    monkeypatch.setenv("BUCKET_NAME", "status-site")
+    monkeypatch.setenv("ENDPOINTS", UP)
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("TOPIC_ARN", "arn:aws:sns:us-east-1:123456789012:status-changes")
+    topic = _Topic()
+    topic.fail = True
+    observed = NOW - timedelta(seconds=30)
+    with mock_aws():
+        clear_cached_resources()
+        table = _create_results_table()
+        _store(table, UP, "us-west-2", observed, ok=False)
+        _store(table, UP, "us-east-1", observed, ok=False)
+        table.put_item(
+            Item={
+                "pk": UP,
+                "sk": STATUS_SORT_KEY,
+                "status": "up",
+                "updated_at": "2026-11-18T13:00:00.000000Z",
+            }
+        )
+        s3 = boto3.client("s3", region_name="us-east-1")
+        s3.create_bucket(Bucket="status-site")
+        with (
+            patch("probe.publisher.datetime", _Clock),
+            patch("probe.publisher._sns_client", return_value=topic),
+            pytest.raises(RuntimeError, match="sns unavailable"),
+        ):
+            handler({}, None)
+        body = json.loads(s3.get_object(Bucket="status-site", Key=STATUS_KEY)["Body"].read())
+        stored = table.get_item(Key={"pk": UP, "sk": STATUS_SORT_KEY}, ConsistentRead=True)
+
+    assert body["endpoints"][0]["status"] == "down"
+    assert stored["Item"]["status"] == "up"
