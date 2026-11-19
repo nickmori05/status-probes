@@ -1,4 +1,4 @@
-"""Synthesized status page: private bucket, OAC, and the publisher role. No AWS calls."""
+"""Synthesized status page: private bucket, OAC, the topic, and the publisher role."""
 
 from __future__ import annotations
 
@@ -148,9 +148,10 @@ def test_distribution_reads_the_bucket_with_origin_access_control() -> None:
     assert forwarded["EnableAcceptEncodingBrotli"] is True
 
 
-def test_publisher_may_only_put_the_two_keys_and_query_the_table() -> None:
+def test_publisher_role_is_limited_to_the_page_the_table_and_the_topic() -> None:
     template = _template()
     bucket_id, _bucket = _one(template, "AWS::S3::Bucket")
+    topic_id, _topic = _one(template, "AWS::SNS::Topic")
     _function_id, function = _one(template, "AWS::Lambda::Function")
     props = function["Properties"]
     assert props["Handler"] == "probe.publisher.handler"
@@ -162,12 +163,18 @@ def test_publisher_may_only_put_the_two_keys_and_query_the_table() -> None:
         "TABLE_NAME": "probe-results",
         "TABLE_REGION": "us-east-1",
         "BUCKET_NAME": {"Ref": bucket_id},
+        "TOPIC_ARN": {"Ref": topic_id},
     }
 
     _policy_id, policy = _one(template, "AWS::IAM::Policy")
     statements = _statements(policy["Properties"]["PolicyDocument"])
     by_sid = {statement["Sid"]: statement for statement in statements}
-    assert set(by_sid) == {"PublishStatusObjects", "QueryProbeResults"}
+    assert set(by_sid) == {
+        "PublishStatusObjects",
+        "QueryProbeResults",
+        "RecordStatusTransition",
+        "PublishStatusChange",
+    }
 
     publish = by_sid["PublishStatusObjects"]
     assert publish["Effect"] == "Allow"
@@ -182,10 +189,46 @@ def test_publisher_may_only_put_the_two_keys_and_query_the_table() -> None:
     assert _actions(query) == ["dynamodb:Query"]
     assert _text(query["Resource"]) == TABLE_ARN
 
+    record = by_sid["RecordStatusTransition"]
+    assert record["Effect"] == "Allow"
+    assert _actions(record) == ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+    assert _text(record["Resource"]) == TABLE_ARN
+
+    change = by_sid["PublishStatusChange"]
+    assert change["Effect"] == "Allow"
+    assert _actions(change) == ["sns:Publish"]
+    assert change["Resource"] == {"Ref": topic_id}
+
     _role_id, role = _one(template, "AWS::IAM::Role")
     managed = role["Properties"]["ManagedPolicyArns"]
     assert len(managed) == 1
     assert _text(managed[0]).endswith(":policy/service-role/AWSLambdaBasicExecutionRole")
+
+
+def test_status_change_topic_has_no_subscription() -> None:
+    template = _template()
+    topic_id, topic = _one(template, "AWS::SNS::Topic")
+    assert topic["Properties"]["TopicName"] == "status-changes"
+    assert "KmsMasterKeyId" not in topic["Properties"]
+    assert template.find_resources("AWS::SNS::Subscription") == {}
+    assert template.find_resources("AWS::SNS::TopicPolicy") == {}
+
+    _function_id, function = _one(template, "AWS::Lambda::Function")
+    assert function["Properties"]["Environment"]["Variables"]["TOPIC_ARN"] == {"Ref": topic_id}
+    _policy_id, policy = _one(template, "AWS::IAM::Policy")
+    statements = _statements(policy["Properties"]["PolicyDocument"])
+    by_sid = {statement["Sid"]: statement for statement in statements}
+    publish = by_sid["PublishStatusChange"]
+    assert _actions(publish) == ["sns:Publish"]
+    assert publish["Resource"] == {"Ref": topic_id}
+    other_sns = [
+        action
+        for statement in statements
+        if statement["Sid"] != "PublishStatusChange"
+        for action in _actions(statement)
+        if action.startswith("sns:")
+    ]
+    assert other_sns == []
 
 
 def test_publisher_runs_once_a_minute() -> None:
