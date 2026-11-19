@@ -6,6 +6,11 @@ embed the status. The handler writes the page first, then the JSON, so a
 failed query leaves the previous objects in place. A failed write is
 logged and re-raised.
 
+After both objects are written, the handler records each up or down and
+publishes to SNS when that status changes. A failed notification is
+logged and re-raised. The page for that minute is already in the bucket.
+A retry sends the notification only if the change was not already sent.
+
 The handler does not invoke the quorum function. It calls the same query
 and majority code, once per endpoint in ``ENDPOINTS``.
 """
@@ -21,6 +26,7 @@ from datetime import UTC, datetime
 import boto3
 from botocore.config import Config
 
+from probe.alerts import notify_transitions
 from probe.handler import parse_endpoints
 from probe.quorum import QuorumResult
 from probe.reader import read_quorum
@@ -37,6 +43,7 @@ logger = logging.getLogger(__name__)
 STATUS_KEY = "status.json"
 PAGE_KEY = "index.html"
 BUCKET_NAME_ENV = "BUCKET_NAME"
+TOPIC_ARN_ENV = "TOPIC_ARN"
 JSON_CONTENT_TYPE = "application/json; charset=utf-8"
 HTML_CONTENT_TYPE = "text/html; charset=utf-8"
 # The StatusPage cache policy holds an object for at most this long.
@@ -160,19 +167,28 @@ def render_status_json(document: dict[str, object]) -> str:
     return json.dumps(document, indent=2) + "\n"
 
 
+def collect_entries(
+    table: object,
+    endpoints: Sequence[str],
+    *,
+    now: datetime,
+) -> list[tuple[str, QuorumResult]]:
+    """Query the freshness window for each endpoint, in ``endpoints`` order.
+
+    A failed query raises before any later endpoint is read. The caller
+    has not written yet, so the previous page stays as it was.
+    """
+    return [(endpoint, read_quorum(table, endpoint, now=now)) for endpoint in endpoints]
+
+
 def collect_status(
     table: object,
     endpoints: Sequence[str],
     *,
     now: datetime,
 ) -> dict[str, object]:
-    """Query the freshness window for each endpoint and build the document.
-
-    A failed query raises before any later endpoint is read. The caller
-    has not written yet, so the previous page stays as it was.
-    """
-    entries = [(endpoint, read_quorum(table, endpoint, now=now)) for endpoint in endpoints]
-    return status_document(entries, generated_at=now)
+    """Query the freshness window for each endpoint and build the document."""
+    return status_document(collect_entries(table, endpoints, now=now), generated_at=now)
 
 
 def publish(client: object, bucket: str, document: dict[str, object]) -> None:
@@ -205,10 +221,10 @@ def handler(event: dict, context: object) -> dict[str, object]:
     """Publish the quorum for every endpoint in ``ENDPOINTS``.
 
     Reads ``probe-results`` using ``TABLE_NAME`` and ``TABLE_REGION``.
-    Writes to the bucket named by ``BUCKET_NAME``. The S3 client uses
-    ``AWS_REGION`` (the function's region, which is where the bucket is),
-    not the table region. Returns the document it wrote. The event is
-    ignored: the schedule does not pass an endpoint.
+    Writes to the bucket named by ``BUCKET_NAME``. The S3 and SNS clients
+    use ``AWS_REGION`` (the function's region, which is where the bucket
+    and the topic are), not the table region. Returns the document it
+    wrote. The event is ignored: the schedule does not pass an endpoint.
     """
     del event, context
     endpoints = parse_endpoints(os.environ.get("ENDPOINTS", ""))
@@ -220,20 +236,44 @@ def handler(event: dict, context: object) -> dict[str, object]:
     table_name = os.environ.get(TABLE_NAME_ENV, "").strip()
     if not table_name:
         raise RuntimeError(f"{TABLE_NAME_ENV} is required")
+    topic_arn = os.environ.get(TOPIC_ARN_ENV, "").strip()
+    if not topic_arn:
+        raise RuntimeError(f"{TOPIC_ARN_ENV} is required")
     table_region = os.environ.get(TABLE_REGION_ENV, "").strip() or DEFAULT_TABLE_REGION
     try:
         table = dynamodb_table(table_name, table_region)
-        document = collect_status(table, endpoints, now=datetime.now(UTC))
+        now = datetime.now(UTC)
+        entries = collect_entries(table, endpoints, now=now)
+        document = status_document(entries, generated_at=now)
         publish(_s3_client(), bucket, document)
     except Exception:
         logger.exception("failed to publish status for %s to %s", endpoints, bucket)
         raise
+    try:
+        notify_transitions(
+            table,
+            _sns_client(),
+            topic_arn,
+            [(endpoint, result.status) for endpoint, result in entries],
+            now=now,
+        )
+    except Exception:
+        logger.exception("failed to notify a status change for %s", endpoints)
+        raise
     return document
 
 
-def _s3_client() -> object:
-    """S3 client in the function's region. Falls back to the table region."""
+def _client(service_name: str) -> object:
+    """Client in the function's region. Falls back to the table region."""
     region = os.environ.get("AWS_REGION", "").strip()
     if not region:
         region = os.environ.get(TABLE_REGION_ENV, "").strip() or DEFAULT_TABLE_REGION
-    return boto3.client("s3", region_name=region, config=_CLIENT_CONFIG)
+    return boto3.client(service_name, region_name=region, config=_CLIENT_CONFIG)
+
+
+def _s3_client() -> object:
+    return _client("s3")
+
+
+def _sns_client() -> object:
+    return _client("sns")

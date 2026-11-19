@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """CDK app: one status table, a probe in each region, a quorum reader, and a status page.
 
-Synthesis does not call AWS. Set CDK_DEFAULT_ACCOUNT to the target account;
-otherwise a placeholder account is used so `cdk synth` runs with no credentials.
+The status page stack also has the topic for a quorum moving between up
+and down. Nothing subscribes to it. Synthesis does not call AWS. Set
+CDK_DEFAULT_ACCOUNT to the target account; otherwise a placeholder
+account is used so `cdk synth` runs with no credentials.
 """
 
 from __future__ import annotations
@@ -53,7 +55,7 @@ StatusPageStack(
     "StatusPage",
     endpoints=ENDPOINTS,
     env=cdk.Environment(account=ACCOUNT, region=DATA_REGION),
-    description="Static status page in us-east-1. Private bucket, CloudFront.",
+    description="Static status page in us-east-1. Private bucket, CloudFront, status topic.",
 )
 
 app.synth()

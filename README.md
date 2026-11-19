@@ -1,6 +1,6 @@
 # status-probes
 
-Multi-region HTTP probes on AWS. Each region checks the same endpoints once a minute, reports the status code and the latency, and writes that observation to the DynamoDB replica in its own region. A reader in us-east-1 reports up or down only when a majority of the three regions agree. A publisher in the same region writes that result to a private S3 bucket once a minute, and CloudFront serves the bucket. Nothing is deployed from this repository.
+Multi-region HTTP probes on AWS. Each region checks the same endpoints once a minute, reports the status code and the latency, and writes that observation to the DynamoDB replica in its own region. A reader in us-east-1 reports up or down only when a majority of the three regions agree. A publisher in the same region writes that result to a private S3 bucket once a minute, and CloudFront serves the bucket. When an endpoint's aggregated status moves between up and down, that publisher sends one message to an SNS topic. Nothing is deployed from this repository.
 
 ## Architecture
 
@@ -17,6 +17,7 @@ flowchart LR
     ruleP[EventBridge every minute] --> pub[Publisher Lambda]
     bucket[("status site")]
     cdn[CloudFront]
+    topic[SNS topic]
   end
   subgraph euw1 [eu-west-1]
     ruleU[EventBridge every minute] --> fnU[Probe Lambda]
@@ -33,6 +34,7 @@ flowchart LR
   quorum -->|query| tableE
   pub -->|query| tableE
   pub -->|put| bucket
+  pub -->|change only| topic
   cdn -->|OAC read| bucket
   tableW <-->|replicate| tableE
   tableE <-->|replicate| tableU
@@ -53,7 +55,9 @@ The role may call `dynamodb:PutItem` and `dynamodb:BatchWriteItem` on `arn:aws:d
 
 `StatusPage` is one stack in us-east-1. It is a Python 3.12 Lambda (`probe.publisher.handler`, named `status-publisher`) and an EventBridge rule on a one-minute rate. `ENDPOINTS` is the same comma-separated list the probes use, taken from `PROBE_ENDPOINTS` at synth time. The function does not invoke `status-quorum`. It queries the us-east-1 replica for each endpoint, using the same window and majority as the reader. It writes `index.html`, then `status.json`. `status.json` is the generated time and, for each endpoint, the status and the regions that voted up, voted down, or had no fresh observation. `index.html` fetches `status.json` and does not embed the status. A failed query leaves the previous objects in place. A failed JSON write leaves the previous status behind the page, which reads that file. Both objects are UTF-8, use `Cache-Control: public, max-age=60`, and are encrypted with SSE-S3.
 
-The bucket blocks all public access, enforces bucket-owner object ownership so ACLs are off, encrypts with an S3-managed key, and denies any request that is not SSL. It is not a website endpoint. CloudFront reads the bucket's regional domain with origin access control and signs every origin request with SigV4. The bucket policy allows that distribution `s3:GetObject` on the bucket's objects. Viewers are redirected from HTTP to HTTPS. The default root object is `index.html`. The cache keeps an object for at most 60 seconds and does not vary on cookies, headers, or query strings. The price class is `PriceClass_100`. The role may call `s3:PutObject` on the `status.json` and `index.html` keys only, and `dynamodb:Query` on `arn:aws:dynamodb:us-east-1:<account>:table/probe-results`. Those are its only added actions. The role has no KMS grant. The stack does not import the table. The bucket's deletion policy is `Delete`. CloudFormation will not delete a bucket that still has objects. Nothing in this stack is deployed.
+The bucket blocks all public access, enforces bucket-owner object ownership so ACLs are off, encrypts with an S3-managed key, and denies any request that is not SSL. It is not a website endpoint. CloudFront reads the bucket's regional domain with origin access control and signs every origin request with SigV4. The bucket policy allows that distribution `s3:GetObject` on the bucket's objects. Viewers are redirected from HTTP to HTTPS. The default root object is `index.html`. The cache keeps an object for at most 60 seconds and does not vary on cookies, headers, or query strings. The price class is `PriceClass_100`. The role may call `s3:PutObject` on the `status.json` and `index.html` keys only, and `dynamodb:Query` on `arn:aws:dynamodb:us-east-1:<account>:table/probe-results`. It may also call `dynamodb:GetItem`, `dynamodb:PutItem`, and `dynamodb:UpdateItem` on that same table ARN, and `sns:Publish` on the `status-changes` topic only. Those are its only added actions. The role has no KMS grant. The stack does not import the table. The bucket's deletion policy is `Delete`. CloudFormation will not delete a bucket that still has objects.
+
+After the page is written, the function compares each endpoint's quorum with the last up or down it stored. That record is an item in the us-east-1 replica. The partition key is the endpoint, and the sort key is `#status`, which sorts before every observation key, so the freshness query does not return it. The item has no `ttl` attribute, so the table does not expire it. The first time an endpoint is up or down, the function stores that status and does not publish. The same status on a later minute does not publish. Unknown does not publish and does not replace a stored up or down, so a minute without a majority is not treated as a status change. A move from up to down, or from down to up, is a conditional update: it is stored only when the item still has the previous status. Only the invocation that stores the change publishes. The message names the endpoint, the previous status, the new status, and the time. A retry that already stored the new status, or that loses the condition, does not publish a second message. If the publish fails, the function writes the previous status back under the same kind of condition and raises, so the next invocation can send it. The topic's name is `status-changes`. It has no subscription. A failed notification leaves the page that was just written in the bucket. Nothing in this stack is deployed.
 
 ## Local commands
 
@@ -85,20 +89,22 @@ PROBE_ENDPOINTS="https://example.com,https://example.org" cdk synth
 | `src/probe/handler.py` | Lambda handler. Reads `ENDPOINTS`, stores observations, returns them |
 | `src/probe/quorum.py` | Latest fresh observation per region, then up, down, or unknown |
 | `src/probe/reader.py` | Query one endpoint's window and return the quorum. Lambda handler |
-| `src/probe/publisher.py` | Quorum for each `ENDPOINTS` URL, then `status.json` and `index.html` |
+| `src/probe/publisher.py` | Quorum for each `ENDPOINTS` URL, then `status.json`, `index.html`, and a change notification |
+| `src/probe/alerts.py` | Last up or down for an endpoint, then SNS only when it changes |
 | `tests/test_probe.py` | Pytest coverage of the checker and the handler, with HTTP mocked |
 | `tests/test_writer.py` | Item shape (`pk`, `sk`, `ttl`) and handler writes. DynamoDB is mocked |
 | `tests/test_quorum.py` | Quorum votes. No AWS |
 | `tests/test_reader.py` | Window query and handler. DynamoDB is mocked |
-| `tests/test_publisher.py` | Rendering and publishing. DynamoDB and S3 are mocked |
+| `tests/test_publisher.py` | Rendering, publishing, and one notification. DynamoDB and S3 are mocked |
+| `tests/test_alerts.py` | Transition, no change, first observation, and a retry. DynamoDB is moto; SNS is a fake |
 | `tests/test_status_data.py` | Synthesized template: replicas, TTL, PITR, and retention |
 | `tests/test_status_probe.py` | Synthesized template: per-region env vars and the write policy |
 | `tests/test_status_quorum.py` | Synthesized template: the query policy, and no schedule |
-| `tests/test_status_page.py` | Synthesized template: OAC, private bucket, PutObject-only policy, schedule |
+| `tests/test_status_page.py` | Synthesized template: OAC, private bucket, topic, publish permission, schedule |
 | `infra/status_data.py` | `StatusData` stack |
 | `infra/status_probe.py` | `StatusProbe` stack |
 | `infra/status_quorum.py` | `StatusQuorum` stack |
-| `infra/status_page.py` | `StatusPage` stack |
+| `infra/status_page.py` | `StatusPage` stack. Publisher, private bucket, CloudFront, and the status-changes topic |
 | `app.py` | Wires the table, the three regional probes, the quorum reader, and the status page |
 | `.github/workflows/ci.yml` | ruff, pytest, and `cdk synth` |
 
@@ -109,6 +115,6 @@ Listed so the next change has a place to start. Nothing in this repository is de
 - [x] **Quorum aggregation across regions.** Treat an endpoint as up or down only when a majority of us-west-2, us-east-1, and eu-west-1 agree, so one region's network blip does not flip the status. The reader and the us-east-1 function are in the repo. They are not deployed. The status page publishes the result.
 - [x] **DynamoDB global table replicas.** Add replicas of `probe-results` in us-west-2 and eu-west-1, and let each probe write in its own region. The global table and the regional write roles are in the repo. Nothing is deployed.
 - [x] **Static status page (S3 + CloudFront).** Publish the aggregated status as a static site. The publisher, the private bucket, and the CloudFront distribution are in the repo. Nothing is deployed.
-- [ ] **SNS alerts on status change.** Notify when an endpoint moves between up and down, not on every minute's probe.
+- [x] **SNS alerts on status change.** Notify when an endpoint moves between up and down, not on every minute's probe. The topic and the transition check are in the repo. The topic has no subscription. Nothing is deployed.
 - [ ] **OIDC deploy workflow.** Let GitHub Actions assume an IAM role and run `cdk deploy`, with no long-lived AWS keys.
 - [ ] **Cost estimate.** Price the three minute-schedule Lambdas, the on-demand table, and the later CloudFront distribution before anything is turned on.

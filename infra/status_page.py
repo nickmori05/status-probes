@@ -2,7 +2,9 @@
 
 The publisher runs once a minute, queries probe-results, and writes
 ``index.html`` and ``status.json``. The bucket is not public. CloudFront
-reads it with origin access control.
+reads it with origin access control. The same function publishes to an
+SNS topic when a quorum moves between up and down. The topic has no
+subscription.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
+from aws_cdk import aws_sns as sns
 from constructs import Construct
 
 from infra.status_data import TABLE_NAME, TABLE_REGION
@@ -29,19 +32,22 @@ FUNCTION_NAME = "status-publisher"
 STATUS_KEY = "status.json"
 PAGE_KEY = "index.html"
 CACHE_SECONDS = 60
+TOPIC_NAME = "status-changes"
 
 
 class StatusPageStack(Stack):
-    """Scheduled publisher, a private bucket, and a CloudFront distribution.
+    """Scheduled publisher, a private bucket, a distribution, and a topic.
 
     ``ENDPOINTS`` is the same comma-separated list the probes use. The role
     may call ``s3:PutObject`` on ``status.json`` and ``index.html`` only,
     and ``dynamodb:Query`` on the us-east-1 replica of ``probe-results``.
-    The table ARN is built from the name, this stack's account, and
+    It may also ``GetItem``, ``PutItem``, and ``UpdateItem`` that replica,
+    for the last up or down, and ``sns:Publish`` on ``status-changes``
+    only. The table ARN is built from the name, this stack's account, and
     us-east-1, so the stack does not import the table. The bucket blocks
     public access, encrypts with an S3-managed key, and denies requests
     that are not SSL. CloudFront is the only reader, and it may only
-    ``s3:GetObject``.
+    ``s3:GetObject``. The topic has no subscription and no KMS key.
     """
 
     def __init__(
@@ -106,6 +112,7 @@ class StatusPageStack(Stack):
             resource_name=TABLE_NAME,
             arn_format=ArnFormat.SLASH_RESOURCE_NAME,
         )
+        topic = sns.Topic(self, "StatusChanges", topic_name=TOPIC_NAME)
         self.publisher = lambda_.Function(
             self,
             "Publisher",
@@ -120,9 +127,12 @@ class StatusPageStack(Stack):
                 "TABLE_NAME": TABLE_NAME,
                 "TABLE_REGION": TABLE_REGION,
                 "BUCKET_NAME": bucket.bucket_name,
+                "TOPIC_ARN": topic.topic_arn,
             },
             log_group=log_group,
-            description="Query probe-results and publish status.json and index.html.",
+            description=(
+                "Query probe-results, publish the status page, and notify on an up or down change."
+            ),
         )
         # SSE-S3 needs no KMS grant. PutObject does not cover the bucket
         # ARN, only the two keys the handler writes.
@@ -141,6 +151,23 @@ class StatusPageStack(Stack):
                 sid="QueryProbeResults",
                 actions=["dynamodb:Query"],
                 resources=[table_arn],
+            )
+        )
+        # GetItem reads the last status. PutItem inserts the first one.
+        # UpdateItem stores a later change, under a condition. The same
+        # table ARN as the query: this stack still does not import it.
+        self.publisher.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="RecordStatusTransition",
+                actions=["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"],
+                resources=[table_arn],
+            )
+        )
+        self.publisher.add_to_role_policy(
+            iam.PolicyStatement(
+                sid="PublishStatusChange",
+                actions=["sns:Publish"],
+                resources=[topic.topic_arn],
             )
         )
 
