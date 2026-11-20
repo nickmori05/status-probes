@@ -59,6 +59,8 @@ The bucket blocks all public access, enforces bucket-owner object ownership so A
 
 After the page is written, the function compares each endpoint's quorum with the last up or down it stored. That record is an item in the us-east-1 replica. The partition key is the endpoint, and the sort key is `#status`, which sorts before every observation key, so the freshness query does not return it. The item has no `ttl` attribute, so the table does not expire it. The first time an endpoint is up or down, the function stores that status and does not publish. The same status on a later minute does not publish. Unknown does not publish and does not replace a stored up or down, so a minute without a majority is not treated as a status change. A move from up to down, or from down to up, is a conditional update: it is stored only when the item still has the previous status. Only the invocation that stores the change publishes. The message names the endpoint, the previous status, the new status, and the time. A retry that already stored the new status, or that loses the condition, does not publish a second message. If the publish fails, the function writes the previous status back under the same kind of condition and raises, so the next invocation can send it. The topic's name is `status-changes`. It has no subscription. A failed notification leaves the page that was just written in the bucket. Nothing in this stack is deployed.
 
+`GithubDeploy` is one stack in us-east-1. It is the IAM OIDC provider for `https://token.actions.githubusercontent.com` and a role named `github-status-probes-deploy`. The provider's client id is `sts.amazonaws.com`. The role trusts that provider for `sts:AssumeRoleWithWebIdentity` only when `aud` is `sts.amazonaws.com`, `sub` is `repo:nickmori05@314151628/status-probes@1458305886:environment:production`, `ref` is `refs/heads/main`, `environment` is `production`, `repository_id` is `1458305886`, and `repository_owner_id` is `314151628`. This repository was created on 2026-11-15. GitHub puts the owner id and the repository id in the subject of a repository created after 2026-07-15. The older subject, `repo:nickmori05/status-probes:environment:production`, is not what this repository sends. The comparisons are `StringEquals`. The subject has no wildcard. A `*` written under `StringEquals` is a literal character and matches no token. `StringLike` would treat `*` as a wildcard, and a pattern such as `repo:nickmori05/status-probes:*` would also match a pull request, and it would not match this subject. A job that names the `production` environment does not put `ref:refs/heads/main` in `sub`. The branch is the separate `ref` claim. `ForAllValues` is not used, because that operator matches when the key is missing. The role may call `sts:AssumeRole` and `sts:TagSession` on the CDK deploy, file-publishing, and lookup roles in us-east-1, us-west-2, and eu-west-1. The qualifier in those names is the CDK default, `hnb659fds`. The role may not assume the CloudFormation execution role or the image-publishing role. The provider does not pin a certificate thumbprint. IAM reads the current intermediate certificate, and it checks this issuer with its trusted roots. Nothing in this stack is deployed.
+
 ## Local commands
 
 Python 3.12. The CDK CLI is Node, pinned to the same version CI installs.
@@ -79,6 +81,26 @@ cdk synth
 ```bash
 PROBE_ENDPOINTS="https://example.com,https://example.org" cdk synth
 ```
+
+## Deploying
+
+`.github/workflows/deploy.yml` runs only when someone starts it (`workflow_dispatch`). A push or a pull request does not start it. The job requests an OIDC token (`id-token: write`) and reads the repository (`contents: read`). It uses the GitHub environment `production`. `aws-actions/configure-aws-credentials` assumes the role named by the environment variable `AWS_DEPLOY_ROLE_ARN`, with audience `sts.amazonaws.com`. That value is a variable, not a secret. The workflow has no AWS access key. The job then runs `cdk deploy` for `GithubDeploy`, `StatusData`, the three `StatusProbe` stacks, `StatusQuorum`, and `StatusPage`.
+
+The workflow cannot create the role it assumes, and it cannot bootstrap an account. Both are one-time steps. This repository has not run them.
+
+An administrator deploys `GithubDeploy` once, with credentials that are not this role. That creates the provider and `github-status-probes-deploy`. An account can hold only one IAM OIDC provider for `https://token.actions.githubusercontent.com`. If that URL is already registered, creating this stack fails.
+
+Bootstrap then runs in the three regions. `--trust` adds the role to the deploy, file-publishing, lookup, and image-publishing roles, for `sts:AssumeRole` and `sts:TagSession`. The role's own policy does not allow the image-publishing role. The functions are zip files. `--trust` has to be passed with `--cloudformation-execution-policies`. `AdministratorAccess` is what a same-account bootstrap attaches when no trust is set. With `--trust`, that policy is named explicitly, and it is attached to `cdk-hnb659fds-cfn-exec-role-*`, which CloudFormation assumes. The GitHub role cannot assume that role.
+
+```bash
+cdk bootstrap aws://ACCOUNT/us-east-1 aws://ACCOUNT/us-west-2 aws://ACCOUNT/eu-west-1 \
+  --trust arn:aws:iam::ACCOUNT:role/github-status-probes-deploy \
+  --cloudformation-execution-policies arn:aws:iam::aws:policy/AdministratorAccess
+```
+
+The GitHub environment `production` is created before anyone runs the workflow, and it is limited to the `main` branch. Its variable `AWS_DEPLOY_ROLE_ARN` is `arn:aws:iam::ACCOUNT:role/github-status-probes-deploy`. The trust policy already requires `refs/heads/main`. The environment rule is the same limit on the GitHub side.
+
+Nothing in this repository is deployed. Running the workflow later would deploy the stacks. Opening a pull request does not run it.
 
 ## Layout
 
@@ -101,12 +123,15 @@ PROBE_ENDPOINTS="https://example.com,https://example.org" cdk synth
 | `tests/test_status_probe.py` | Synthesized template: per-region env vars and the write policy |
 | `tests/test_status_quorum.py` | Synthesized template: the query policy, and no schedule |
 | `tests/test_status_page.py` | Synthesized template: OAC, private bucket, topic, publish permission, schedule |
+| `tests/test_github_deploy.py` | Synthesized template: trust conditions and the bootstrap assume |
 | `infra/status_data.py` | `StatusData` stack |
 | `infra/status_probe.py` | `StatusProbe` stack |
 | `infra/status_quorum.py` | `StatusQuorum` stack |
 | `infra/status_page.py` | `StatusPage` stack. Publisher, private bucket, CloudFront, and the status-changes topic |
-| `app.py` | Wires the table, the three regional probes, the quorum reader, and the status page |
+| `infra/github_deploy.py` | `GithubDeploy` stack. OIDC provider and the deploy role |
+| `app.py` | Wires the table, the three regional probes, the quorum reader, the status page, and the deploy role |
 | `.github/workflows/ci.yml` | ruff, pytest, and `cdk synth` |
+| `.github/workflows/deploy.yml` | Manual `cdk deploy`. OIDC, no AWS keys. A pull request does not run it |
 
 ## Roadmap
 
@@ -116,5 +141,5 @@ Listed so the next change has a place to start. Nothing in this repository is de
 - [x] **DynamoDB global table replicas.** Add replicas of `probe-results` in us-west-2 and eu-west-1, and let each probe write in its own region. The global table and the regional write roles are in the repo. Nothing is deployed.
 - [x] **Static status page (S3 + CloudFront).** Publish the aggregated status as a static site. The publisher, the private bucket, and the CloudFront distribution are in the repo. Nothing is deployed.
 - [x] **SNS alerts on status change.** Notify when an endpoint moves between up and down, not on every minute's probe. The topic and the transition check are in the repo. The topic has no subscription. Nothing is deployed.
-- [ ] **OIDC deploy workflow.** Let GitHub Actions assume an IAM role and run `cdk deploy`, with no long-lived AWS keys.
+- [x] **OIDC deploy workflow.** Let GitHub Actions assume an IAM role and run `cdk deploy`, with no long-lived AWS keys. The provider, the role, and the manual workflow are in the repo. Nothing is deployed.
 - [ ] **Cost estimate.** Price the three minute-schedule Lambdas, the on-demand table, and the later CloudFront distribution before anything is turned on.

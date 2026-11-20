@@ -2,9 +2,10 @@
 """CDK app: one status table, a probe in each region, a quorum reader, and a status page.
 
 The status page stack also has the topic for a quorum moving between up
-and down. Nothing subscribes to it. Synthesis does not call AWS. Set
-CDK_DEFAULT_ACCOUNT to the target account; otherwise a placeholder
-account is used so `cdk synth` runs with no credentials.
+and down. Nothing subscribes to it. GithubDeploy is the OIDC role a
+manual workflow would assume to deploy these stacks. Synthesis does not
+call AWS. Set CDK_DEFAULT_ACCOUNT to the target account; otherwise a
+placeholder account is used so `cdk synth` runs with no credentials.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 import os
 
 import aws_cdk as cdk
+from infra.github_deploy import GithubDeployStack
 from infra.status_data import TABLE_REGION, StatusDataStack
 from infra.status_page import StatusPageStack
 from infra.status_probe import StatusProbeStack
@@ -56,6 +58,13 @@ StatusPageStack(
     endpoints=ENDPOINTS,
     env=cdk.Environment(account=ACCOUNT, region=DATA_REGION),
     description="Static status page in us-east-1. Private bucket, CloudFront, status topic.",
+)
+
+GithubDeployStack(
+    app,
+    "GithubDeploy",
+    env=cdk.Environment(account=ACCOUNT, region=DATA_REGION),
+    description="GitHub Actions OIDC role. Assumes the CDK bootstrap roles only.",
 )
 
 app.synth()
