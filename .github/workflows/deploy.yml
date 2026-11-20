@@ -1,0 +1,54 @@
+name: deploy
+
+# Started by hand. A push or a pull request does not run this workflow,
+# so opening a pull request does not deploy anything.
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install the CDK CLI
+        run: npm install -g aws-cdk@2.1148.1
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          audience: sts.amazonaws.com
+          aws-region: us-east-1
+          role-session-name: status-probes-deploy
+
+      - name: Deploy
+        # The role ARN is an environment variable on `production`, not a secret.
+        # There are no AWS access keys in this workflow.
+        run: >
+          cdk deploy
+          GithubDeploy
+          StatusData
+          StatusProbe-us-west-2
+          StatusProbe-us-east-1
+          StatusProbe-eu-west-1
+          StatusQuorum
+          StatusPage
+          --require-approval never
