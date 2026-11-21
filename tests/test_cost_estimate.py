@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 
 from cost.estimate import (
     Assumptions,
@@ -11,6 +12,7 @@ from cost.estimate import (
     estimate,
     format_usd,
     observation_item_bytes,
+    render_report,
     significant_digits,
 )
 
@@ -117,6 +119,11 @@ def test_europe_viewers_use_the_other_price_class_100_rate() -> None:
     eu_cdn = next(line for line in europe.lines if line.name == "CloudFront")
     assert eu_cdn.list_usd > us_cdn.list_usd
     assert eu_cdn.after_usd == 0
+
+
+def test_cost_doc_quotes_the_report() -> None:
+    doc = Path("docs/COST.md").read_text()
+    assert render_report() in doc
 
 
 def test_format_usd_keeps_a_tenth_of_a_cent() -> None:
