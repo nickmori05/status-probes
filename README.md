@@ -74,9 +74,10 @@ npm install -g aws-cdk@2.1148.1
 ruff check .
 pytest
 cdk synth
+python -m cost.estimate
 ```
 
-`cdk synth` does not need AWS credentials. When `CDK_DEFAULT_ACCOUNT` is unset, the app uses account `123456789012` so synthesis stays local. To bake a different endpoint list into the functions:
+`cdk synth` and the cost estimate do not need AWS credentials. When `CDK_DEFAULT_ACCOUNT` is unset, the app uses account `123456789012` so synthesis stays local. To bake a different endpoint list into the functions:
 
 ```bash
 PROBE_ENDPOINTS="https://example.com,https://example.org" cdk synth
@@ -124,6 +125,9 @@ Nothing in this repository is deployed. Running the workflow later would deploy 
 | `tests/test_status_quorum.py` | Synthesized template: the query policy, and no schedule |
 | `tests/test_status_page.py` | Synthesized template: OAC, private bucket, topic, publish permission, schedule |
 | `tests/test_github_deploy.py` | Synthesized template: trust conditions and the bootstrap assume |
+| `tests/test_cost_estimate.py` | Monthly estimate: the arithmetic, the allowances, and the quoted total |
+| `cost/estimate.py` | Computes that estimate from the assumptions and the unit prices |
+| `docs/COST.md` | The assumptions, the prices, and the monthly total. Nothing is deployed |
 | `infra/status_data.py` | `StatusData` stack |
 | `infra/status_probe.py` | `StatusProbe` stack |
 | `infra/status_quorum.py` | `StatusQuorum` stack |
@@ -142,4 +146,4 @@ Listed so the next change has a place to start. Nothing in this repository is de
 - [x] **Static status page (S3 + CloudFront).** Publish the aggregated status as a static site. The publisher, the private bucket, and the CloudFront distribution are in the repo. Nothing is deployed.
 - [x] **SNS alerts on status change.** Notify when an endpoint moves between up and down, not on every minute's probe. The topic and the transition check are in the repo. The topic has no subscription. Nothing is deployed.
 - [x] **OIDC deploy workflow.** Let GitHub Actions assume an IAM role and run `cdk deploy`, with no long-lived AWS keys. The provider, the role, and the manual workflow are in the repo. Nothing is deployed.
-- [ ] **Cost estimate.** Price the three minute-schedule Lambdas, the on-demand table, and the later CloudFront distribution before anything is turned on.
+- [x] **Cost estimate.** Price the three minute-schedule Lambdas, the on-demand table, and the later CloudFront distribution before anything is turned on. The monthly numbers are in `docs/COST.md`. Nothing is deployed.
