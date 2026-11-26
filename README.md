@@ -49,6 +49,8 @@ The construct is `TableV2`, which synthesizes `AWS::DynamoDB::GlobalTable`. The 
 
 `StatusProbe` is one stack per region: us-west-2, us-east-1, and eu-west-1. Each stack is a Python 3.12 Lambda (`probe.handler.handler`) and an EventBridge rule on a one-minute rate. The function package is `src/`. Lambda's Python 3.12 runtime provides boto3, so the package does not vendor it. The function's `ENDPOINTS` variable is a comma-separated list, taken from `PROBE_ENDPOINTS` at synth time or defaulting to `https://example.com`. `TABLE_NAME` is `probe-results` and `TABLE_REGION` is the stack's own region, so each probe writes to the replica beside it. The probe region on each item is `AWS_REGION`, which Lambda sets. An item also stores the status code, the latency in milliseconds, `ok`, `error`, and `ttl`. `ttl` is the time of the observation plus `RESULT_RETENTION_DAYS` (default 7). One observation is a PutItem. More than one uses the batch writer. The function returns its observations. If the write fails, it logs those observations and re-raises: the results stay in the log, and the invocation fails.
 
+Each check is one GET with a 5 second timeout. A timeout or a connection failure is classified and tried once more, after 0.25 seconds. The wait doubles before any attempt after that. The default is two attempts. An HTTP response, including an error status, is not tried again. The observation is the last attempt. Its latency is that attempt's time to headers, and it does not include an earlier attempt or the wait. The value the function returns includes `attempts` and, on a failure, `error_kind` of `timeout`, `connection`, or `http`. The stored item has neither attribute. A retried success is stored as that success, with `error` null. A stored transport failure has `error` set to `timeout`, or to `connection:` and the reason. A check that failed, or that took more than one attempt, is logged before the write. A first-attempt success is not. Two attempts that both run to the timeout, plus the 0.25 second wait, take 10.25 seconds. The function timeout stays 20 seconds. Endpoints are checked one after another, so two endpoints that both time out twice can reach that limit before the write.
+
 The role may call `dynamodb:PutItem` and `dynamodb:BatchWriteItem` on `arn:aws:dynamodb:<region>:<account>:table/probe-results`, where `<region>` is the stack's region. Those are its only added actions. The ARN is built from the table name, the stack account, and that region. The probe stacks do not import the table, so they can be deployed in any order later.
 
 `StatusQuorum` is one function in us-east-1, `probe.reader.handler`, named `status-quorum`. It is not on a schedule. An invoker passes `endpoint`. The function queries the us-east-1 replica for the last three minutes and returns the endpoint, the status, and the regions that voted up, voted down, or had no fresh observation. For each of us-west-2, us-east-1, and eu-west-1 it keeps the latest observation in the window. The endpoint is up when at least two of those regions are fresh and `ok`, and down when at least two are fresh and not `ok`. One region, a split, or a stale sample is unknown, so one region's blip does not flip the status. The role may call `dynamodb:Query` on `arn:aws:dynamodb:us-east-1:<account>:table/probe-results`. That is its only added action. This stack does not import the table either.
@@ -107,14 +109,14 @@ Nothing in this repository is deployed. Running the workflow later would deploy 
 
 | Path | What it is |
 | --- | --- |
-| `src/probe/checker.py` | GET one URL; status code and latency to headers |
+| `src/probe/checker.py` | GET one URL; retry a timeout or a connection failure once |
 | `src/probe/writer.py` | One observation as a `probe-results` item, then PutItem or the batch writer |
-| `src/probe/handler.py` | Lambda handler. Reads `ENDPOINTS`, stores observations, returns them |
+| `src/probe/handler.py` | Lambda handler. Reads `ENDPOINTS`, logs a retry or a failure, stores observations |
 | `src/probe/quorum.py` | Latest fresh observation per region, then up, down, or unknown |
 | `src/probe/reader.py` | Query one endpoint's window and return the quorum. Lambda handler |
 | `src/probe/publisher.py` | Quorum for each `ENDPOINTS` URL, then `status.json`, `index.html`, and a change notification |
 | `src/probe/alerts.py` | Last up or down for an endpoint, then SNS only when it changes |
-| `tests/test_probe.py` | Pytest coverage of the checker and the handler, with HTTP mocked |
+| `tests/test_probe.py` | Pytest coverage of the checker, the retry, and the handler. HTTP is mocked |
 | `tests/test_writer.py` | Item shape (`pk`, `sk`, `ttl`) and handler writes. DynamoDB is mocked |
 | `tests/test_quorum.py` | Quorum votes. No AWS |
 | `tests/test_reader.py` | Window query and handler. DynamoDB is mocked |
@@ -147,3 +149,4 @@ Listed so the next change has a place to start. Nothing in this repository is de
 - [x] **SNS alerts on status change.** Notify when an endpoint moves between up and down, not on every minute's probe. The topic and the transition check are in the repo. The topic has no subscription. Nothing is deployed.
 - [x] **OIDC deploy workflow.** Let GitHub Actions assume an IAM role and run `cdk deploy`, with no long-lived AWS keys. The provider, the role, and the manual workflow are in the repo. Nothing is deployed.
 - [x] **Cost estimate.** Price the three minute-schedule Lambdas, the on-demand table, and the later CloudFront distribution before anything is turned on. The monthly numbers are in `docs/COST.md`. Nothing is deployed.
+- [x] **Retry a probe that got no response.** Classify a timeout separately from a connection failure, and try that request once more before storing it. An HTTP status is not retried. The checker is in the repo. Nothing is deployed.

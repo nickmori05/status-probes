@@ -63,7 +63,7 @@ If every scheduled invocation ran for its 20 second timeout, the list price woul
 
 The month is 30 days, which is the month the Lambda pricing examples use. One rule then fires 43,200 times.
 
-A probe's billed duration is assumed to be 300 ms, and the publisher's 400 ms. The HTTP client gives up after 5 seconds, and both functions time out at 20 seconds. The last line of the quote is that ceiling: every scheduled invocation billed for the full 20 seconds. The quorum function stays at zero invocations.
+A probe's billed duration is assumed to be 300 ms, and the publisher's 400 ms. One HTTP attempt gives up after 5 seconds. A timeout or a connection failure is tried once more, so one endpoint can take 10.25 seconds. Both functions time out at 20 seconds. The last line of the quote is that ceiling: every scheduled invocation billed for the full 20 seconds. The quorum function stays at zero invocations.
 
 A page view is one HTTPS request for `index.html` and one for `status.json`. The viewer is in the United States, Mexico, and Canada group, which price class 100 includes. The other group in that price class, Europe, Israel, and Türkiye, has a higher request price. Passing `viewer="europe"` uses it. The cache holds an object for at most 60 seconds, and the estimate treats every view as a miss, so each view is also two S3 GETs. Data transferred from S3 to CloudFront is free.
 
