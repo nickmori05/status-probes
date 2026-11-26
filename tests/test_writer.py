@@ -135,11 +135,17 @@ def test_handler_writes_each_endpoint(
         clear_cached_resources()
         table = _create_results_table()
         before = int(datetime.now(UTC).timestamp())
-        with patch(
-            "probe.checker.urllib.request.urlopen",
-            side_effect=[_Response(200), urllib.error.URLError("timed out")],
-        ):
-            payload = handler({}, None)
+        with patch("probe.checker.time.sleep") as sleep:
+            with patch(
+                "probe.checker.urllib.request.urlopen",
+                side_effect=[
+                    _Response(200),
+                    urllib.error.URLError("timed out"),
+                    urllib.error.URLError("timed out"),
+                ],
+            ):
+                payload = handler({}, None)
+        sleep.assert_called_once_with(0.25)
         after = int(datetime.now(UTC).timestamp())
         stored = {item["pk"]: item for item in table.scan()["Items"]}
 
@@ -156,8 +162,43 @@ def test_handler_writes_each_endpoint(
     failed = stored["https://b.example/health"]
     assert failed["status_code"] is None
     assert failed["ok"] is False
-    assert failed["error"] == "timed out"
+    assert failed["error"] == "timeout"
+    assert "attempts" not in failed
+    assert "error_kind" not in failed
     assert failed["region"] == "us-west-2"
+    timed_out = next(
+        item for item in payload["results"] if item["url"] == "https://b.example/health"
+    )
+    assert timed_out["attempts"] == 2
+    assert timed_out["error_kind"] == "timeout"
+
+
+def test_handler_stores_the_attempt_that_succeeded(
+    aws_credentials: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TABLE_NAME", "probe-results")
+    monkeypatch.setenv("TABLE_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    monkeypatch.setenv("ENDPOINTS", "https://example.com/health")
+    with mock_aws():
+        clear_cached_resources()
+        table = _create_results_table()
+        with patch("probe.checker.time.sleep") as sleep:
+            with patch(
+                "probe.checker.urllib.request.urlopen",
+                side_effect=[urllib.error.URLError("timed out"), _Response(200)],
+            ):
+                payload = handler({}, None)
+        items = table.scan()["Items"]
+
+    sleep.assert_called_once_with(0.25)
+    assert len(items) == 1
+    assert items[0]["ok"] is True
+    assert int(items[0]["status_code"]) == 200
+    assert items[0]["error"] is None
+    assert "attempts" not in items[0]
+    assert payload["results"][0]["attempts"] == 2
+    assert payload["results"][0]["error_kind"] is None
 
 
 def test_handler_targets_the_table_region(
