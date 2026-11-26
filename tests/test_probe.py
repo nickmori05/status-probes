@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import urllib.error
 from http.client import HTTPMessage
 from unittest.mock import patch
@@ -165,6 +166,50 @@ def test_check_url_rejects_a_non_positive_budget() -> None:
         check_url("https://example.com/health", timeout=0)
     with pytest.raises(ValueError, match="backoff"):
         check_url("https://example.com/health", backoff=-0.1)
+
+
+def test_handler_logs_a_retry_and_a_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("TABLE_NAME", raising=False)
+    monkeypatch.setenv("ENDPOINTS", "https://a.example/health, https://b.example/health")
+    with caplog.at_level(logging.INFO, logger="probe.handler"):
+        with patch("probe.checker.time.sleep"):
+            with patch(
+                "probe.checker.urllib.request.urlopen",
+                side_effect=[
+                    urllib.error.URLError("timed out"),
+                    _Response(200),
+                    urllib.error.URLError(ConnectionRefusedError(111, "Connection refused")),
+                    urllib.error.URLError(ConnectionRefusedError(111, "Connection refused")),
+                ],
+            ):
+                payload = handler({}, None)
+
+    assert payload["results"][0]["attempts"] == 2
+    assert payload["results"][0]["ok"] is True
+    assert payload["results"][1]["error_kind"] == "connection"
+    messages = [record.getMessage() for record in caplog.records if record.name == "probe.handler"]
+    assert len(messages) == 2
+    assert messages[0].startswith("probe https://a.example/health ok=True ")
+    assert "error=None" in messages[0]
+    assert "attempts=2" in messages[0]
+    assert messages[1].startswith("probe https://b.example/health ok=False ")
+    assert "error_kind" not in messages[1]
+    assert "attempts=2" in messages[1]
+    assert "connection:" in messages[1]
+
+
+def test_handler_does_not_log_a_first_attempt_success(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("TABLE_NAME", raising=False)
+    monkeypatch.setenv("ENDPOINTS", "https://a.example/health")
+    with caplog.at_level(logging.INFO, logger="probe.handler"):
+        with patch("probe.checker.urllib.request.urlopen", return_value=_Response(204)):
+            handler({}, None)
+
+    assert [record for record in caplog.records if record.name == "probe.handler"] == []
 
 
 def test_handler_checks_each_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
